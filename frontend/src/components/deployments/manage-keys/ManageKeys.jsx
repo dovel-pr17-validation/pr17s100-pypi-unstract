@@ -1,0 +1,426 @@
+import { Copy, Eye, EyeOff, Pencil, Plus, Trash2 } from "lucide-react";
+import PropTypes from "prop-types";
+import { useEffect, useState } from "react";
+import { Button } from "@/components/ui/shims/antd-button";
+import { Input, Switch } from "@/components/ui/shims/antd-inputs";
+import { Space } from "@/components/ui/shims/antd-layout";
+import { Modal, Tooltip } from "@/components/ui/shims/antd-overlays";
+import { Table } from "@/components/ui/shims/antd-structure";
+import { Typography } from "@/components/ui/shims/antd-typography";
+
+import { canEditResource } from "../../../helpers/resourceAccess";
+import { useAxiosPrivate } from "../../../hooks/useAxiosPrivate";
+import { useCopyToClipboard } from "../../../hooks/useCopyToClipboard";
+import { useAlertStore } from "../../../store/alert-store";
+import { useSessionStore } from "../../../store/session-store";
+import { CustomButton } from "../../widgets/custom-button/CustomButton.jsx";
+import SpaceWrapper from "../../widgets/space-wrapper/SpaceWrapper.jsx";
+import { SpinnerLoader } from "../../widgets/spinner-loader/SpinnerLoader.jsx";
+import { DeleteModal } from "../delete-modal/DeleteModal.jsx";
+import "./ManageKeys.css";
+import { useExceptionHandler } from "../../../hooks/useExceptionHandler.jsx";
+
+// A key is a credential, so the table shows only its last four characters
+// until someone asks to see it. Anything on screen is also in the page text
+// a browsing agent reads. Copy takes the full key from the row, so copying
+// never needs a reveal. A key too short for its last four to be a small part
+// of it shows no characters at all. The list API still sends the full key
+// (UN-4562).
+const MIN_LENGTH_TO_SHOW_TAIL = 12;
+const maskApiKey = (key) => {
+  if (!key) {
+    return "";
+  }
+  const text = String(key);
+  return text.length < MIN_LENGTH_TO_SHOW_TAIL
+    ? "••••••••"
+    : `••••••••${text.slice(-4)}`;
+};
+
+const ManageKeys = ({
+  isDialogOpen,
+  setDialogOpen,
+  apiKeys,
+  setApiKeys,
+  selectedApiRow,
+  apiService,
+  type,
+}) => {
+  const { sessionDetails } = useSessionStore();
+  // Keys are managed by the deployment's owner, so a shared user reads them
+  // but cannot add one or change its state (UN-2868).
+  const canEdit = canEditResource(selectedApiRow, sessionDetails);
+  const ownerOnlyTitle = canEdit ? "" : "Only the owner can change this";
+  const axiosPrivate = useAxiosPrivate();
+  const handleException = useExceptionHandler();
+  const copyToClipboard = useCopyToClipboard();
+  const [isTableLoading, setIsTableLoading] = useState(false);
+  const { setAlertDetails } = useAlertStore();
+  const [isNewKey, setIsNewKey] = useState(false);
+  const [isEditKey, setIsEditKey] = useState(false);
+  const [formDetails, setFormDetails] = useState({});
+  const [canAdd, setCanAdd] = useState(false);
+  const [selectedKeyRow, setSelectedKeyRow] = useState({});
+  const [openDeleteModal, setOpenDeleteModal] = useState(false);
+  const [visibleKeyIds, setVisibleKeyIds] = useState(() => new Set());
+
+  // ManageKeys stays mounted while the modal is closed (its callers render it
+  // unconditionally), so a key revealed for one deployment or pipeline must not
+  // still be showing when the modal next opens. Clearing on close means a
+  // revealed key is masked again while the modal fades out; that is intended.
+  useEffect(() => {
+    if (!isDialogOpen) {
+      setVisibleKeyIds(new Set());
+    }
+  }, [isDialogOpen]);
+
+  useEffect(() => {
+    if (isNewKey) {
+      setFormDetails({
+        description: "",
+        [type]: selectedApiRow?.id,
+        is_active: true,
+      });
+    } else {
+      setFormDetails({});
+    }
+  }, [isNewKey]);
+
+  useEffect(() => {
+    if (isEditKey) {
+      setFormDetails({
+        description: selectedKeyRow?.description,
+        [type]: selectedApiRow?.id,
+        is_active: selectedKeyRow?.is_active,
+      });
+    } else {
+      setFormDetails({});
+    }
+  }, [isEditKey]);
+
+  const closeAddKey = () => {
+    setIsNewKey(false);
+    setIsEditKey(false);
+    setCanAdd(false);
+  };
+
+  const addTableData = (newKeyRow) => {
+    setApiKeys((prev) => {
+      const prevData = [...prev];
+      prevData.push(newKeyRow);
+      return prevData;
+    });
+  };
+
+  const updateTableData = (id, updatedRow) => {
+    setApiKeys((prevRecords) => {
+      return prevRecords.map((record) => {
+        if (record.id === id) {
+          return updatedRow;
+        }
+        return record;
+      });
+    });
+  };
+
+  const deleteTableData = (id) => {
+    setApiKeys((prevRecords) => {
+      return prevRecords.filter((record) => record.id !== id);
+    });
+  };
+
+  const createKey = () => {
+    apiService
+      .createApiKey(selectedApiRow?.id, formDetails)
+      .then((res) => {
+        addTableData(res?.data);
+        setAlertDetails({
+          type: "success",
+          content: "Key added successfully",
+        });
+      })
+      .catch((err) => {
+        setAlertDetails(handleException(err));
+      })
+      .finally(() => {
+        closeAddKey();
+      });
+  };
+
+  const updateKey = () => {
+    apiService
+      .updateApiKey(selectedKeyRow?.id, formDetails)
+      .then((res) => {
+        updateTableData(selectedKeyRow?.id, res?.data);
+        setAlertDetails({
+          type: "success",
+          content: "Key updated successfully",
+        });
+      })
+      .catch((err) => {
+        setAlertDetails(handleException(err));
+      })
+      .finally(() => {
+        closeAddKey();
+      });
+  };
+
+  const openAddModal = () => {
+    setIsNewKey(true);
+    setIsEditKey(false);
+  };
+
+  const openEditModal = (record) => {
+    setSelectedKeyRow(record);
+    setIsEditKey(true);
+    setIsNewKey(false);
+  };
+
+  const showDeleteModal = (record) => {
+    setSelectedKeyRow(record);
+    setOpenDeleteModal(true);
+  };
+
+  const deleteApiKey = () => {
+    apiService
+      .deleteApiKey(selectedKeyRow?.id)
+      .then((res) => {
+        deleteTableData(selectedKeyRow?.id);
+        setAlertDetails({
+          type: "success",
+          content: "Key deleted successfully",
+        });
+      })
+      .catch((err) => {
+        setAlertDetails(handleException(err));
+      })
+      .finally(() => {
+        setOpenDeleteModal(false);
+      });
+  };
+
+  const onChangeHandler = (propertyName, value) => {
+    const body = {
+      [propertyName]: value,
+    };
+    if (value?.trim().length > 0) {
+      setCanAdd(true);
+    } else {
+      setCanAdd(false);
+    }
+    setFormDetails({ ...formDetails, ...body });
+  };
+
+  const handleCloseDialog = () => {
+    setDialogOpen(false);
+  };
+
+  const updateKeyStatus = (record) => {
+    setIsTableLoading(true);
+    record.is_active = !record?.is_active;
+    const requestOptions = {
+      method: "PUT",
+      url: `/api/v1/unstract/${sessionDetails?.orgId}/api/keys/${record?.id}/`,
+      headers: {
+        "X-CSRFToken": sessionDetails?.csrfToken,
+      },
+      data: record,
+    };
+
+    axiosPrivate(requestOptions)
+      .then((res) => {
+        setAlertDetails({
+          type: "success",
+          content: "Status updated successfully",
+        });
+      })
+      .catch((err) => {
+        setAlertDetails(handleException(err));
+      })
+      .finally(() => {
+        setIsTableLoading(false);
+      });
+  };
+
+  const toggleKeyVisibility = (id) => {
+    setVisibleKeyIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const columns = [
+    {
+      title: "Description",
+      dataIndex: "description",
+      key: "description",
+    },
+    {
+      title: "API Key",
+      dataIndex: "api_key",
+      key: "api_key",
+      render: (_, record) => {
+        const isVisible = visibleKeyIds.has(record?.id);
+        return (
+          <Space direction="horizontal" className="action-items">
+            <Tooltip title="Copy key">
+              <Button
+                type="text"
+                size="small"
+                icon={<Copy />}
+                aria-label="Copy API key"
+                onClick={() => copyToClipboard(record?.api_key, "API key")}
+              />
+            </Tooltip>
+            <Typography.Text className="manage-keys__key">
+              {isVisible ? record?.api_key : maskApiKey(record?.api_key)}
+            </Typography.Text>
+            <Tooltip title={isVisible ? "Hide key" : "Show key"}>
+              <Button
+                type="text"
+                size="small"
+                icon={isVisible ? <EyeOff /> : <Eye />}
+                aria-label={isVisible ? "Hide API key" : "Show API key"}
+                onClick={() => toggleKeyVisibility(record?.id)}
+              />
+            </Tooltip>
+          </Space>
+        );
+      },
+    },
+    {
+      title: "Active",
+      key: "is_active",
+      dataIndex: "is_active",
+      align: "center",
+      render: (_, record) => (
+        <Tooltip title={ownerOnlyTitle}>
+          <Switch
+            size="small"
+            checked={record.is_active}
+            disabled={!canEdit}
+            onChange={(e) => {
+              updateKeyStatus(record);
+            }}
+          />
+        </Tooltip>
+      ),
+    },
+    {
+      title: "Actions",
+      key: "pipeline_id",
+      align: "center",
+      render: (_, record) => (
+        <>
+          <Space
+            className="actions"
+            aria-disabled={!canEdit}
+            onClick={() => canEdit && openEditModal(record)}
+          >
+            <Tooltip title={ownerOnlyTitle || "edit"} className="cursorPointer">
+              <Pencil />
+            </Tooltip>
+          </Space>
+          <Space
+            className="actions"
+            aria-disabled={!canEdit}
+            onClick={() => canEdit && showDeleteModal(record)}
+          >
+            <Tooltip
+              title={ownerOnlyTitle || "delete"}
+              className="cursorPointer"
+            >
+              <Trash2 />
+            </Tooltip>
+          </Space>
+        </>
+      ),
+    },
+  ];
+
+  return (
+    <>
+      <Modal
+        title="Manage Keys"
+        centered
+        maskClosable={false}
+        open={isDialogOpen}
+        onCancel={handleCloseDialog}
+        width={700}
+        footer={null}
+      >
+        <div className="display-flex-right new-key-btn">
+          <Tooltip title={ownerOnlyTitle}>
+            <CustomButton
+              type="primary"
+              size="small"
+              icon={<Plus />}
+              disabled={!canEdit}
+              onClick={openAddModal}
+            >
+              New Key
+            </CustomButton>
+          </Tooltip>
+        </div>
+        <div className="keys-table">
+          <Table
+            size="small"
+            dataSource={apiKeys}
+            columns={columns}
+            rowKey="id"
+            loading={{
+              indicator: <SpinnerLoader />,
+              spinning: isTableLoading,
+            }}
+            pagination={{ defaultPageSize: 5 }}
+          />
+        </div>
+      </Modal>
+      {(isNewKey || isEditKey) && (
+        <Modal
+          title={isNewKey ? "Add Key" : "Update Key"}
+          centered
+          open={isNewKey || isEditKey}
+          onOk={isNewKey ? createKey : updateKey}
+          okText={isNewKey ? "Add" : "Update"}
+          okButtonProps={{ disabled: !canAdd }}
+          onCancel={closeAddKey}
+        >
+          <SpaceWrapper>
+            <Typography>Description</Typography>
+            <Input
+              placeholder="Description"
+              name="description"
+              onChange={(e) => onChangeHandler("description", e.target.value)}
+              value={formDetails.description || ""}
+            ></Input>
+          </SpaceWrapper>
+        </Modal>
+      )}
+      {openDeleteModal && (
+        <DeleteModal
+          open={openDeleteModal}
+          setOpen={setOpenDeleteModal}
+          deleteRecord={deleteApiKey}
+        />
+      )}
+    </>
+  );
+};
+
+ManageKeys.propTypes = {
+  isDialogOpen: PropTypes.bool.isRequired,
+  setDialogOpen: PropTypes.func.isRequired,
+  apiKeys: PropTypes.array.isRequired,
+  setApiKeys: PropTypes.func.isRequired,
+  selectedApiRow: PropTypes.object.isRequired,
+  apiService: PropTypes.object.isRequired,
+  type: PropTypes.string.isRequired,
+};
+
+export { ManageKeys };

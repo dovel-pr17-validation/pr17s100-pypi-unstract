@@ -1,0 +1,136 @@
+.org-container {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+}
+
+.card-list-container {
+  /* The scroll region. `.org-list` fills `.org-container`'s 100vh as a column
+   * flex container, so without `min-height: 0` this box refuses to shrink
+   * below its content: the extra org cards spill past the viewport and are
+   * clipped instead of scrolling. */
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  /* Was `margin: 10%`. The horizontal half was redundant — `width: 80%` plus
+   * `align-items: center` on `.org-list` lands the cards at the same offset —
+   * so card geometry is unchanged. Note top/bottom percentages resolve
+   * against the containing block's WIDTH, as they did before. */
+  margin: 5% 0;
+  width: 80%;
+  /* Room below for `.org-card-container`'s box-shadow, which the scroll box
+   * clips. No horizontal padding: it would narrow the cards and worsen the
+   * overlap between a long org name and the Connect button that
+   * `.ant-card-meta-title` below causes by setting `text-overflow: ellipsis`
+   * with no `overflow: hidden`. Fix that rule and this constraint expires.
+   * The right-hand shadow stays clipped either way; at ~5% alpha it reads as
+   * nothing. */
+  padding-bottom: 32px;
+}
+.org-list {
+  background: #ffffff;
+  flex: 1;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  z-index: 20;
+}
+
+.org-svg {
+  flex: 1;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.select-org {
+  width: 320px;
+  margin-bottom: 16px;
+}
+
+.continue-button {
+  width: 320px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: inline-block;
+}
+
+.org-avatar {
+  display: flex;
+  width: 100px;
+  height: 80px;
+}
+.org-card-container {
+  box-shadow: 8px 8px 24px 0px #0202460d;
+  margin-top: 15px;
+}
+
+.org-card-container .ant-card-body {
+  padding: 12px;
+}
+
+.org-card-container .ant-card-body {
+  display: flex;
+  width: 100%;
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.org-card-container .ant-card-meta {
+  align-items: center;
+  width: 75%;
+}
+
+.yellow-grad-circle {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  z-index: -1;
+}
+
+.red-grad-circle {
+  position: absolute;
+  top: 0;
+  right: 0;
+}
+
+.select-org-unstract-logo {
+  width: 200px;
+  margin-top: 10%;
+  /* Flex items default to `flex-shrink: 1`, so a long org list squashed the
+   * logo instead of scrolling — measured at 0px height, not merely thin. */
+  flex-shrink: 0;
+}
+
+.select-org-button {
+  background: #ff4d6d;
+  color: #fff;
+}
+
+.select-org-button:active,
+.select-org-button:hover {
+  color: #fff !important;
+  border-color: #fff !important;
+}
+
+.org-card-container .ant-card-meta-title {
+  color: var(--foreground);
+  font-weight: 700;
+  font-size: 20px;
+  text-overflow: ellipsis;
+}
+
+.org-svg {
+  background: #f5f7f9;
+}
+
+.org-selection-svg {
+  padding-left: 50px;
+  width: 95%;
+}

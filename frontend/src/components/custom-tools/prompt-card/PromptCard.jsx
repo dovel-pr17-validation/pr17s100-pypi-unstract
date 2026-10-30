@@ -1,0 +1,491 @@
+import PropTypes from "prop-types";
+import { memo, useEffect, useRef, useState } from "react";
+
+import {
+  PROMPT_RUN_API_STATUSES,
+  promptStudioUpdateStatus,
+} from "../../../helpers/GetStaticData";
+import usePostHogEvents from "../../../hooks/usePostHogEvents";
+import { useAlertStore } from "../../../store/alert-store";
+import { useCustomToolStore } from "../../../store/custom-tool-store";
+import { useSocketCustomToolStore } from "../../../store/socket-custom-tool";
+import { OutputForDocModal } from "../output-for-doc-modal/OutputForDocModal";
+import { PromptCardItems } from "./PromptCardItems";
+import "./PromptCard.css";
+import { handleUpdateStatus } from "./constants";
+
+let useEnforceTypeSwitchGatePlugin;
+try {
+  const mod = await import(
+    "../../../plugins/lookup-studio/hooks/useEnforceTypeSwitchGate"
+  );
+  useEnforceTypeSwitchGatePlugin = mod.useEnforceTypeSwitchGate;
+} catch {
+  // Cloud plugin not present; gate falls back to no-op below.
+}
+
+const useEnforceTypeSwitchGate =
+  useEnforceTypeSwitchGatePlugin || (() => () => null);
+
+// Fields with an inline error renderer on the card. Anything else falls back
+// to the global alert, so widening the sanitizer cannot silence a rejection.
+const RENDERABLE_FIELD_ERRORS = new Set(["prompt_key"]);
+
+const PromptCard = memo(
+  ({
+    promptDetails,
+    handleChangePromptCard,
+    handleDelete,
+    updatePlaceHolder,
+    promptOutputs,
+    enforceTypeList,
+    allTableSettings,
+    setAllTableSettings,
+    setUpdatedPromptsCopy,
+    handlePromptRunRequest,
+    promptRunStatus,
+    coverageCountData,
+    isChallenge,
+  }) => {
+    const [promptDetailsState, setPromptDetailsState] = useState({});
+    const [isPromptDetailsStateUpdated, setIsPromptDetailsStateUpdated] =
+      useState(false);
+    const [updateStatus, setUpdateStatus] = useState({
+      promptId: null,
+      status: null,
+    });
+    const [promptKey, setPromptKey] = useState("");
+    const [promptText, setPromptText] = useState("");
+    const [selectedLlmProfileId, setSelectedLlmProfileId] = useState(null);
+    const [fieldErrors, setFieldErrors] = useState({});
+    // Per-field attempt counter. The key input is debounced, not disabled
+    // while saving, so a slow rejection can land after a newer attempt has
+    // already been accepted; only the latest attempt may touch state.
+    const attemptGen = useRef({});
+
+    const [isCoverageLoading, setIsCoverageLoading] = useState(false);
+    const [openOutputForDoc, setOpenOutputForDoc] = useState(false);
+    const [progressMsg, setProgressMsg] = useState({});
+    const [spsLoading, setSpsLoading] = useState({});
+    const {
+      llmProfiles,
+      selectedDoc,
+      details,
+      summarizeIndexStatus,
+      updateCustomTool,
+      singlePassExtractMode,
+    } = useCustomToolStore();
+    const { messages } = useSocketCustomToolStore();
+    const { setAlertDetails } = useAlertStore();
+    const { setPostHogCustomEvent } = usePostHogEvents();
+    const enforceTypeSwitchGate = useEnforceTypeSwitchGate();
+
+    useEffect(() => {
+      if (
+        isPromptDetailsStateUpdated ||
+        !Object.keys(promptDetails || {})?.length
+      ) {
+        return;
+      }
+      setPromptDetailsState(promptDetails);
+      setIsPromptDetailsStateUpdated(true);
+    }, [promptDetails]);
+
+    // Initialize promptKey from props so the message filter can match
+    // per-prompt PROGRESS messages (executor sends component.prompt_key).
+    useEffect(() => {
+      if (promptDetailsState?.prompt_key && !promptKey) {
+        setPromptKey(promptDetailsState.prompt_key);
+      }
+    }, [promptDetailsState?.prompt_key]);
+
+    // Clear stale progress text when execution finishes.
+    useEffect(() => {
+      if (!isCoverageLoading) {
+        setProgressMsg({});
+      }
+    }, [isCoverageLoading]);
+
+    useEffect(() => {
+      // Find the latest message that matches the criteria
+      const msg = [...messages]
+        .reverse()
+        .find(
+          (item) =>
+            (item?.component?.prompt_id === promptDetailsState?.prompt_id ||
+              item?.component?.prompt_key === promptKey ||
+              item?.component?.tool_id === details?.tool_id) &&
+            (item?.level === "INFO" || item?.level === "ERROR"),
+        );
+
+      // If no matching message is found, return early
+      if (!msg) {
+        return;
+      }
+
+      // Set the progress message state with the found message
+      setProgressMsg({
+        message: msg?.message || "",
+        level: msg?.level || "INFO",
+      });
+    }, [messages, promptDetailsState?.prompt_id, promptKey, details?.tool_id]);
+
+    useEffect(() => {
+      setSelectedLlmProfileId(
+        promptDetailsState?.profile_manager || llmProfiles[0]?.profile_id,
+      );
+    }, [promptDetailsState]);
+
+    useEffect(() => {
+      const promptRunStatusKeys = Object.keys(promptRunStatus);
+
+      const coverageLoading = promptRunStatusKeys.some(
+        (key) => promptRunStatus[key] === PROMPT_RUN_API_STATUSES.RUNNING,
+      );
+      setIsCoverageLoading(coverageLoading);
+    }, [promptRunStatus]);
+
+    const handleChange = async (
+      event,
+      promptId,
+      dropdownItem,
+      isUpdateStatus = false,
+    ) => {
+      let name = "";
+      let value = "";
+      if (dropdownItem?.length) {
+        name = dropdownItem;
+        value = event;
+      } else {
+        name = event.target.name;
+        value = event.target.value;
+      }
+
+      /*
+       * Functional update, NOT a spread of the captured snapshot. Header's
+       * debounced savers hold on to the `handleChange` from the render they
+       * were called in, so a save can land against newer state than it was
+       * built from. Spreading the snapshot wrote every *other* field back as
+       * it stood then: ticking "Enable Postprocessing Webhook" and typing the
+       * URL inside the 300ms toggle debounce made the URL save re-assert
+       * `enable_postprocessing_webhook: false`, unticking the box the user
+       * had just ticked (the PATCH itself only ever carries `name`, so the
+       * server kept both values and a refresh looked correct).
+       */
+      const prevValue = promptDetailsState?.[name];
+
+      const generation = (attemptGen.current[name] =
+        (attemptGen.current[name] || 0) + 1);
+      const isLatestAttempt = () => attemptGen.current[name] === generation;
+
+      const clearFieldError = () =>
+        setFieldErrors((prev) => {
+          if (!(name in prev)) return prev;
+          const next = { ...prev };
+          delete next[name];
+          return next;
+        });
+
+      // New attempt — drop any prior inline error for this field.
+      clearFieldError();
+
+      handleUpdateStatus(
+        isUpdateStatus,
+        promptId,
+        promptStudioUpdateStatus.isUpdating,
+        setUpdateStatus,
+      );
+      setPromptDetailsState((prev) => ({ ...prev, [name]: value }));
+
+      // Collected here but applied in the rejection handler, so the inline
+      // error and the rollback below always land in the same render.
+      let inlineErrors = null;
+      const reportFieldError = (errors) => {
+        // A superseded attempt reports nothing: the newer one owns the field
+        // and surfaces its own outcome, so an alert here would contradict the
+        // value the user can see was accepted.
+        if (!isLatestAttempt()) {
+          return true;
+        }
+        const renderable = Object.entries(errors).filter(([attr]) =>
+          RENDERABLE_FIELD_ERRORS.has(attr),
+        );
+        // Nothing renderable — the caller falls back to the global alert so a
+        // rejected value can never fail silently.
+        if (!renderable.length) {
+          return false;
+        }
+        inlineErrors = Object.fromEntries(renderable);
+        return true;
+      };
+
+      return handleChangePromptCard(name, value, promptId, reportFieldError)
+        .then((res) => {
+          const data = res?.data;
+          setUpdatedPromptsCopy((prev) => {
+            prev[promptId] = data;
+            return prev;
+          });
+          if (isLatestAttempt()) {
+            clearFieldError();
+          }
+          handleUpdateStatus(
+            isUpdateStatus,
+            promptId,
+            promptStudioUpdateStatus.done,
+            setUpdateStatus,
+          );
+        })
+        .catch((err) => {
+          handleUpdateStatus(isUpdateStatus, promptId, null, setUpdateStatus);
+          if (isLatestAttempt()) {
+            // Roll the field back to the stored value even when the rejected
+            // text stays in the input: outputs, highlights and confidence are
+            // keyed off prompt_key and have to track the server.
+            setPromptDetailsState((prev) => ({ ...prev, [name]: prevValue }));
+            if (inlineErrors) {
+              setFieldErrors((prev) => ({ ...prev, ...inlineErrors }));
+            }
+          }
+          // Callers keeping their own copy of the value (Header's webhook and
+          // toggle state) roll back off this rejection.
+          throw err;
+        })
+        .finally(() => {
+          if (isUpdateStatus) {
+            setTimeout(() => {
+              handleUpdateStatus(true, promptId, null, setUpdateStatus);
+            }, 3000);
+          }
+        });
+    };
+
+    const handleSelectDefaultLLM = (llmProfileId) => {
+      setSelectedLlmProfileId(llmProfileId);
+      // Error already surfaced by handleChange; no local copy to roll back.
+      handleChange(
+        llmProfileId,
+        promptDetailsState?.prompt_id,
+        "profile_manager",
+      ).catch(() => {});
+    };
+
+    const addCoordsToFlattened = (coords, flattened) => {
+      if (Array.isArray(coords)) {
+        // Strip 5th element (confidence) if present, keep only first 4 elements
+        const coordsOnly = coords.length >= 5 ? coords.slice(0, 4) : coords;
+        flattened.push(coordsOnly);
+      }
+    };
+
+    const processNestedArray = (nestedValue, flattened) => {
+      if (Array.isArray(nestedValue)) {
+        nestedValue.forEach((coords) => {
+          addCoordsToFlattened(coords, flattened);
+        });
+      }
+    };
+
+    const processObjectValues = (item, flattened) => {
+      if (typeof item === "object" && !Array.isArray(item)) {
+        Object.values(item).forEach((value) => {
+          processNestedArray(value, flattened);
+        });
+      }
+    };
+
+    const processArrayItem = (item, flattened) => {
+      if (Array.isArray(item)) {
+        addCoordsToFlattened(item, flattened);
+      } else {
+        processObjectValues(item, flattened);
+      }
+    };
+
+    const flattenHighlightData = (data) => {
+      if (!data || typeof data !== "object") {
+        return data;
+      }
+
+      const flattened = [];
+      Object.values(data).forEach((value) => {
+        if (Array.isArray(value)) {
+          value.forEach((item) => {
+            processArrayItem(item, flattened);
+          });
+        }
+      });
+      return flattened;
+    };
+
+    const handleSelectHighlight = (
+      highlightData,
+      highlightedPrompt,
+      highlightedProfile,
+      confidenceData,
+    ) => {
+      if (details?.enable_highlight) {
+        const processedHighlight =
+          singlePassExtractMode &&
+          typeof highlightData === "object" &&
+          !Array.isArray(highlightData)
+            ? flattenHighlightData(highlightData)
+            : highlightData;
+
+        updateCustomTool({
+          selectedHighlight: {
+            highlight: processedHighlight,
+            highlightedPrompt: highlightedPrompt,
+            highlightedProfile: highlightedProfile,
+            confidence: confidenceData,
+          },
+        });
+      }
+    };
+
+    const handleTypeChange = (value) => {
+      const block = enforceTypeSwitchGate(promptDetailsState?.prompt_id, value);
+      if (block) {
+        setAlertDetails({ type: "error", content: block.reason });
+        return;
+      }
+      handleChange(
+        value,
+        promptDetailsState?.prompt_id,
+        "enforce_type",
+        true,
+      ).catch(() => {});
+    };
+
+    const handleSpsLoading = (docId, isLoadingStatus) => {
+      setSpsLoading((prev) => ({
+        ...prev,
+        [docId]: isLoadingStatus,
+      }));
+    };
+
+    // Generate the result for the currently selected document
+    const handleRun = (promptRunType, promptId, profileId, documentId) => {
+      try {
+        setPostHogCustomEvent("ps_prompt_run", {
+          info: "Click on 'Run Prompt' button (Multi Pass)",
+        });
+      } catch {
+        // Analytics failure should not block prompt execution
+      }
+
+      const validateInputs = () => {
+        if (!selectedDoc) {
+          setAlertDetails({
+            type: "error",
+            content: "Document not selected",
+          });
+          return true;
+        }
+
+        if (!promptKey) {
+          setAlertDetails({
+            type: "error",
+            content: "Prompt key cannot be empty",
+          });
+          return true;
+        }
+
+        if (!promptText) {
+          setAlertDetails({
+            type: "error",
+            content: "Prompt cannot be empty",
+          });
+          return true;
+        }
+
+        return false;
+      };
+
+      if (validateInputs()) {
+        return;
+      }
+
+      const docId = selectedDoc?.document_id;
+      const isSummaryIndexed = [...summarizeIndexStatus].find(
+        (item) => item?.docId === docId && item?.isIndexed === true,
+      );
+
+      if (
+        !isSummaryIndexed &&
+        details?.summarize_as_source &&
+        details?.summarize_llm_profile
+      ) {
+        // Summary needs to be indexed before running the prompt
+        setAlertDetails({
+          type: "error",
+          content: `Summary needs to be indexed before running the prompt - ${selectedDoc?.document_name}.`,
+        });
+        return;
+      }
+
+      handlePromptRunRequest(promptRunType, promptId, profileId, documentId);
+    };
+
+    return (
+      <>
+        <PromptCardItems
+          promptDetails={promptDetailsState}
+          enforceTypeList={enforceTypeList}
+          allTableSettings={allTableSettings}
+          promptKey={promptKey}
+          setAllTableSettings={setAllTableSettings}
+          setPromptKey={setPromptKey}
+          promptText={promptText}
+          setPromptText={setPromptText}
+          progressMsg={progressMsg}
+          handleRun={handleRun}
+          handleChange={handleChange}
+          handleTypeChange={handleTypeChange}
+          handleDelete={handleDelete}
+          updateStatus={updateStatus}
+          updatePlaceHolder={updatePlaceHolder}
+          isCoverageLoading={isCoverageLoading}
+          setOpenOutputForDoc={setOpenOutputForDoc}
+          selectedLlmProfileId={selectedLlmProfileId}
+          handleSelectDefaultLLM={handleSelectDefaultLLM}
+          spsLoading={spsLoading}
+          handleSpsLoading={handleSpsLoading}
+          promptOutputs={promptOutputs}
+          promptRunStatus={promptRunStatus}
+          coverageCountData={coverageCountData}
+          isChallenge={isChallenge}
+          handleSelectHighlight={handleSelectHighlight}
+          fieldErrors={fieldErrors}
+        />
+        <OutputForDocModal
+          open={openOutputForDoc}
+          setOpen={setOpenOutputForDoc}
+          promptId={promptDetailsState?.prompt_id}
+          promptKey={promptDetailsState?.prompt_key}
+          profileManagerId={selectedLlmProfileId}
+        />
+      </>
+    );
+  },
+);
+
+PromptCard.displayName = "PromptCard";
+
+PromptCard.propTypes = {
+  promptDetails: PropTypes.object.isRequired,
+  handleChangePromptCard: PropTypes.func.isRequired,
+  handleDelete: PropTypes.func.isRequired,
+  updatePlaceHolder: PropTypes.string,
+  promptOutputs: PropTypes.object.isRequired,
+  enforceTypeList: PropTypes.array.isRequired,
+  allTableSettings: PropTypes.array.isRequired,
+  setAllTableSettings: PropTypes.func.isRequired,
+  setUpdatedPromptsCopy: PropTypes.func.isRequired,
+  handlePromptRunRequest: PropTypes.func.isRequired,
+  promptRunStatus: PropTypes.object.isRequired,
+  coverageCountData: PropTypes.array,
+  isChallenge: PropTypes.bool.isRequired,
+};
+
+export { PromptCard };

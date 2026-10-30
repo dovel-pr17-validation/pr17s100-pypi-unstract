@@ -1,0 +1,163 @@
+default_language_version:
+  python: python3.12
+default_stages:
+  - pre-commit
+
+ci:
+  skip:
+    - hadolint-docker # Fails in pre-commit CI
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude_types:
+          - "markdown"
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: [--unsafe]
+      - id: check-added-large-files
+        args: ["--maxkb=10240"]
+      - id: check-case-conflict
+      - id: check-docstring-first
+      - id: check-ast
+      - id: check-json
+        # Both files are JSONC — their tooling (VS Code, tsc) allows comments,
+        # but this hook parses with strict `json.loads`, which does not.
+        exclude: "(\\.vscode/launch\\.json|frontend/tsconfig\\.json)$"
+      - id: check-executables-have-shebangs
+      - id: check-shebang-scripts-are-executable
+      - id: check-toml
+      - id: debug-statements
+      - id: detect-private-key
+      - id: check-merge-conflict
+      - id: check-symlinks
+      - id: destroyed-symlinks
+      - id: forbid-new-submodules
+      - id: mixed-line-ending
+      - id: no-commit-to-branch
+
+  # Duplicate mapping keys only. `check-yaml` above cannot catch them: it runs
+  # with `--unsafe`, which parses for syntax without constructing the
+  # document, and even without that flag it loads via `yaml.safe_load`, which
+  # resolves a duplicate to the last occurrence silently. Docker Compose's
+  # loader rejects them outright, so the two disagree and CI is the stricter.
+  # That gap shipped a `docker-compose.test.yaml` with a second `backend:`
+  # key: pre-commit passed it and the e2e tier then died at `compose up`
+  # before a container started.
+  #
+  # Every other yamllint rule is off, deliberately. The repo has no yamllint
+  # baseline and this hook is not an invitation to adopt one: `extends:
+  # default` reports 333 findings across the 22 tracked YAML files (270 of
+  # them line-length), which would get the hook disabled rather than the
+  # files fixed. With only `key-duplicates` the same 22 files are clean, so
+  # it needs no exclusions and no per-file waivers.
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.38.0
+    hooks:
+      - id: yamllint
+        name: check yaml for duplicate keys
+        args: ["-d", "{rules: {key-duplicates: enable}}"]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.3.4
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/hadialqattan/pycln
+    rev: v2.6.0
+    hooks:
+      - id: pycln
+        args: [--config=pyproject.toml]
+
+  # - repo: https://github.com/pycqa/docformatter
+  #   rev: v1.7.5
+  #   hooks:
+  #     - id: docformatter
+  #       language: python
+
+  - repo: https://github.com/asottile/pyupgrade
+    rev: v3.17.0
+    hooks:
+      - id: pyupgrade
+        entry: pyupgrade --py39-plus --keep-runtime-typing
+        types:
+          - python
+
+  # - repo: https://github.com/astral-sh/uv-pre-commit
+  #   rev: 0.6.11
+  #   hooks:
+  #     - id: uv-lock
+
+  # - repo: https://github.com/pre-commit/mirrors-mypy
+  #   rev: v1.11.2
+  #   hooks:
+  #     - id: mypy
+  #       language: system
+  #       entry: mypy .
+  #       pass_filenames: false
+  #       additional_dependencies: []
+
+  - repo: local
+    hooks:
+      - id: biome-check
+        name: biome check
+        # `language: node` lets pre-commit provision Biome itself, so this runs
+        # in pre-commit CI too instead of needing a local bun/npx.
+        #
+        # Not the upstream biomejs/pre-commit hook: that one runs from the repo
+        # root, but Biome's project root here is `frontend/` (where biome.json
+        # lives). Running from the root resolves the wrong package.json, which
+        # changes both `organizeImports` grouping and CSS formatting. Hence the
+        # `cd frontend` plus stripping the prefix off the paths pre-commit
+        # passes, which are relative to the repo root.
+        entry: bash -c 'cd frontend && biome check --write --files-ignore-unknown=true --no-errors-on-unmatched "${@#frontend/}"' --
+        language: node
+        additional_dependencies: ["@biomejs/biome@2.3.13"]
+        files: ^frontend/src/
+        types_or: [javascript, jsx, ts, tsx, json]
+
+      - id: unstract-tests
+        name: Run selected unstract tests (.test-selection)
+        # Only fires when the developer has opted in by creating .test-selection
+        # (newline-delimited group names, gitignored). Runs serially without
+        # coverage to stay fast in a commit hook.
+        # Use python3 (stock Ubuntu / many container images ship no `python`
+        # symlink), matching .github/scripts/combine-test-reports.sh.
+        entry: bash -c 'if [ -f .test-selection ]; then "$(command -v python3 || command -v python)" -m tests.rig run --from-file .test-selection --no-coverage --no-parallel; fi'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: v0.42.0
+    hooks:
+      - id: markdownlint
+        args: [--disable, MD013]
+      - id: markdownlint-fix
+        args: [--disable, MD013]
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.2
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/Lucas-C/pre-commit-hooks-nodejs
+    rev: v1.1.2
+    hooks:
+      - id: htmlhint
+
+  - repo: https://github.com/hadolint/hadolint
+    rev: v2.12.1-beta
+    hooks:
+      - id: hadolint-docker
+        args:
+          - --ignore=DL3003
+          - --ignore=DL3008
+          - --ignore=DL3013
+          - --ignore=DL3018
+          - --ignore=SC1091
+        files: Dockerfile$
